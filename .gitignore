@@ -8,3 +8,7 @@
 !.gitattributes
 !SahurRaising/Assets/02. Scripts/**/*.cs
 !SahurRaising/Assets/Editor/**/*.cs
+
+# 로컬 전용(서드파티) — 스테이징 노이즈 방지
+SahurRaising/Assets/MobileDependencyResolver/
+SahurRaising/Assets/com.IvanMurzak/
