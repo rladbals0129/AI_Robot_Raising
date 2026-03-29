@@ -1,0 +1,10 @@
+# 포트폴리오 저장소: 아래 경로의 *.cs 만 버전에 포함합니다.
+# (로컬 전체 Unity 프로젝트와 함께 쓸 때 나머지 파일이 실수로 스테이징되지 않도록 화이트리스트)
+
+**
+!**/
+!README.md
+!.gitignore
+!.gitattributes
+!SahurRaising/Assets/02. Scripts/**/*.cs
+!SahurRaising/Assets/Editor/**/*.cs

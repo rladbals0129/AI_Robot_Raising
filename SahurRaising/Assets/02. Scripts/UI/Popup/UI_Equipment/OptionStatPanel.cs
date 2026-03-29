@@ -1,0 +1,44 @@
+using BreakInfinity;
+using SahurRaising.Core;
+using SahurRaising.Utils;
+using TMPro;
+using UnityEngine;
+
+namespace SahurRaising
+{
+    public class OptionStatPanel : MonoBehaviour
+    {
+        [SerializeField] private TMP_Text _equipTypeText;
+        [SerializeField] private TMP_Text _currentStatText;
+        [SerializeField] private TMP_Text _nextStatText;
+
+        public void UpdateEquipmentStatText(OptionValue optionValue, int level)
+        {
+            if (_equipTypeText != null)
+            {
+                _equipTypeText.text = optionValue.Type;
+            }
+
+            BigDouble baseValue = new BigDouble(optionValue.Base);
+            BigDouble upValue = new BigDouble(optionValue.Up);
+
+            BigDouble currentValue = baseValue + (Mathf.Max(0, level - 1) * upValue);
+            BigDouble nextValue = currentValue + upValue;
+
+            //double currentValue = optionValue.Base + (Mathf.Max(0, level - 1) * optionValue.Up);
+            //double nextValue = currentValue + optionValue.Up;
+
+            if (_currentStatText != null)
+            {
+                //_currentStatText.text = currentValue.ToString("F2");
+                _currentStatText.text = NumberFormatUtil.FormatBigDouble(currentValue);
+            }
+
+            if (_nextStatText != null)
+            {
+                //_nextStatText.text = nextValue.ToString("F2");
+                _nextStatText.text = NumberFormatUtil.FormatBigDouble(nextValue);
+            }
+        }
+    }
+}

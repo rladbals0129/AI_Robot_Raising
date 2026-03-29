@@ -1,0 +1,345 @@
+﻿using System;
+using System.Collections.Generic;
+using System.IO;
+using BreakInfinity;
+using Cysharp.Threading.Tasks;
+using UnityEngine;
+
+namespace SahurRaising.Core
+{
+    public class GachaService : IGachaService
+    {
+        private const string SaveKey = "gacha";
+
+        private readonly IResourceService _resourceService;
+        private readonly ICurrencyService _currencyService;
+        private readonly IEquipmentService _equipmentService;
+        private readonly IDroneService _droneService;
+        private readonly IEventBus _eventBus;
+        private readonly IDataService _dataService;
+
+        private GachaLevelConfig _levelConfig;
+
+        // 타입별 핸들러 관리
+        private readonly Dictionary<GachaType, IGachaHandler> _handlers = new();
+
+        // 타입별 가챠 데이터 관리
+        private readonly Dictionary<GachaType, GachaTypeSaveData> _gachaData = new();
+
+        // 타입별 UI 전략 관리
+        private readonly Dictionary<GachaType, IGachaResultStrategy> _resultStrategies = new();
+
+        public bool IsInitialized { get; private set; }
+        public GachaLevelConfig LevelConfig => _levelConfig;
+
+        public GachaService(
+            IResourceService resourceService,
+            ICurrencyService currencyService,
+            IEquipmentService equipmentService,
+            IDroneService droneService,
+            IEventBus eventBus,
+            IDataService dataService)
+        {
+            _resourceService = resourceService;
+            _currencyService = currencyService;
+            _equipmentService = equipmentService;
+            _droneService = droneService;
+            _eventBus = eventBus;
+            _dataService = dataService;
+        }
+
+        public async UniTask InitializeAsync()
+        {
+            var gachaEquipmentTable = await _resourceService.LoadTableAsync<GachaEquipmentTable>("GachaEquipmentTable");
+            var gachaDroneTable = await _resourceService.LoadTableAsync<GachaDroneTable>("GachaDroneTable");
+            var equipmentTable = await _resourceService.LoadTableAsync<EquipmentTable>("EquipmentTable");
+            var droneTable = await _resourceService.LoadTableAsync<DroneTable>("DroneTable");
+            _levelConfig = await _resourceService.LoadAssetAsync<GachaLevelConfig>("GachaLevelConfig");
+
+            if (gachaEquipmentTable == null || gachaDroneTable == null)
+            {
+                Debug.LogError("[GachaService] 가챠 테이블 로드 실패");
+                return;
+            }
+
+            if (_levelConfig == null)
+            {
+                Debug.LogError("[GachaService] GachaLevelConfig 로드 실패");
+                return;
+            }
+
+            // 핸들러 등록
+            _handlers[GachaType.Equipment] = new EquipmentGachaHandler(gachaEquipmentTable, equipmentTable, _levelConfig, _equipmentService);
+            _handlers[GachaType.Drone] = new DroneGachaHandler(gachaDroneTable, droneTable, _droneService);
+
+            // UI 전략 등록
+            _resultStrategies[GachaType.Equipment] = new EquipmentGachaResultStrategy();
+            _resultStrategies[GachaType.Drone] = new DroneGachaResultStrategy();
+
+            await LoadAsync();
+            IsInitialized = true;
+        }
+
+        public IGachaResultStrategy GetResultStrategy(GachaType type)
+        {
+            if (_resultStrategies.TryGetValue(type, out var strategy))
+            {
+                return strategy;
+            }
+
+            Debug.LogWarning($"[GachaService] {type}에 대한 결과 전략을 찾을 수 없습니다.");
+            return null;
+        }
+
+        public int GetGachaLevel(GachaType type)
+        {
+            return _gachaData.TryGetValue(type, out var data) ? data.Level : 0;
+        }
+
+        public int GetGachaCount(GachaType type)
+        {
+            return _gachaData.TryGetValue(type, out var data) ? data.Count : 0;
+        }
+
+        public int GetRequiredCountForNextLevel(GachaType type)
+        {
+            if (_levelConfig == null)
+                return 0;
+
+            int currentLevel = GetGachaLevel(type);
+            int maxLevel = _levelConfig.GetMaxLevel(type);
+
+            if (currentLevel >= maxLevel)
+                return 0; // 이미 최대 레벨
+
+            return _levelConfig.GetRequiredCountForLevel(type, currentLevel + 1);
+        }
+
+        public int GetRequiredCountForLevel(GachaType type, int level)
+        {
+            if (_levelConfig == null)
+                return 0;
+
+            return _levelConfig.GetRequiredCountForLevel(type, level);
+        }
+
+        public CurrencyType GetCurrencyType(GachaType type)
+        {
+            switch (type)
+            {
+                case GachaType.Equipment:
+                    return CurrencyType.Diamond;
+                case GachaType.Drone:
+                    return CurrencyType.Diamond;
+                default:
+                    Debug.LogWarning($"[GachaService] 알 수 없는 가챠 타입: {type}. 기본값 Diamond를 반환합니다.");
+                    return CurrencyType.Diamond;
+            }
+        }
+
+        public List<GachaResult> Pull(GachaType type, int count, BigDouble cost)
+        {
+            if (!IsInitialized)
+            {
+                Debug.LogError("[GachaService] 초기화되지 않았습니다.");
+                return new List<GachaResult>();
+            }
+
+            // 핸들러 가져오기
+            if (!_handlers.TryGetValue(type, out var handler))
+            {
+                Debug.LogError($"[GachaService] {type} 타입의 핸들러를 찾을 수 없습니다.");
+                return new List<GachaResult>();
+            }
+
+            // 비용 차감
+            var currencyType = GetCurrencyType(type);
+            if (!_currencyService.TryConsume(currencyType, cost, $"Gacha_{type}_{count}"))
+            {
+                Debug.LogWarning($"[GachaService] 재화 부족: {currencyType} {cost} 필요");
+                return new List<GachaResult>();
+            }
+
+            int currentLevel = GetGachaLevel(type);
+            int currentCount = GetGachaCount(type);
+
+            var results = handler.Pull(currentLevel, count);
+
+            // 가챠 횟수 증가
+            int newCount = currentCount + count;
+
+            // 현재 레벨에서 다음 레벨로 가기 위해 필요한 개수
+            int nextLevelRequiredCount = _levelConfig.GetRequiredCountForLevel(type, currentLevel + 1);
+
+            // 최대 레벨
+            int maxLevel = _levelConfig.GetMaxLevel(type);
+
+            if (currentLevel < maxLevel && newCount >= nextLevelRequiredCount)
+            {
+                newCount = newCount - nextLevelRequiredCount;
+                currentLevel++;
+            }
+
+            // 데이터 업데이트
+            _gachaData[type] = new GachaTypeSaveData(type, newCount, currentLevel);
+
+            // 이벤트 발행
+            _eventBus?.Publish(new GachaPullEvent
+            {
+                Type = type,
+                Count = count,
+                Results = results
+            });
+
+            return results;
+        }
+
+        public void AddResultsToInventory(GachaType type, List<GachaResult> results)
+        {
+            if (results == null || results.Count == 0)
+                return;
+
+            if (!_handlers.TryGetValue(type, out var handler))
+            {
+                Debug.LogError($"[GachaService] {type} 타입의 핸들러를 찾을 수 없습니다.");
+                return;
+            }
+
+            foreach (var result in results)
+            {
+                handler.AddToInventory(result);
+            }
+        }
+
+        public List<GachaProbability> GetProbabilitiesForLevel(GachaType type, int level)
+        {
+            if (!IsInitialized)
+            {
+                Debug.LogError("[GachaService] 초기화되지 않았습니다.");
+                return new List<GachaProbability>();
+            }
+
+            if (!_handlers.TryGetValue(type, out var handler))
+            {
+                Debug.LogError($"[GachaService] {type} 타입의 핸들러를 찾을 수 없습니다.");
+                return new List<GachaProbability>();
+            }
+
+            return handler.GetProbabilitiesForLevel(level);
+        }
+
+        public int GetMaxLevel(GachaType type)
+        {
+            if (!IsInitialized)
+            {
+                Debug.LogError("[GachaService] 초기화되지 않았습니다.");
+                return 1;
+            }
+
+            if (!_handlers.TryGetValue(type, out var handler))
+            {
+                Debug.LogError($"[GachaService] {type} 타입의 핸들러를 찾을 수 없습니다.");
+                return 1;
+            }
+
+            return handler.GetMaxLevel();
+        }
+
+        public async UniTask SaveAsync()
+        {
+            try
+            {
+                var data = new GachaSaveData();
+                data.GachaDataList.Clear();
+
+                // 모든 GachaType에 대해 데이터 저장
+                foreach (GachaType type in System.Enum.GetValues(typeof(GachaType)))
+                {
+                    if (_gachaData.TryGetValue(type, out var gachaData))
+                    {
+                        data.GachaDataList.Add(gachaData);
+                    }
+                    else
+                    {
+                        // 데이터가 없는 경우 기본값으로 저장
+                        int count = 0;
+                        int level = 1;
+                        var defaultData = new GachaTypeSaveData(type, count, level);
+                        _gachaData[type] = defaultData;
+                        data.GachaDataList.Add(defaultData);
+                    }
+                }
+
+                var json = JsonUtility.ToJson(data);
+                await _dataService.SaveAsync(SaveKey, json);
+                Debug.Log($"[GachaService] 저장 완료: {SaveKey}");
+            }
+            catch (Exception ex)
+            {
+                Debug.LogError($"[GachaService] 저장 실패: {ex.Message}");
+            }
+        }
+
+        public async UniTask LoadAsync()
+        {
+            try
+            {
+                var json = await _dataService.LoadAsync(SaveKey);
+                if (string.IsNullOrEmpty(json))
+                {
+                    Debug.Log("[GachaService] 저장 파일이 없어 기본값으로 초기화합니다.");
+                    _gachaData.Clear();
+                    await SaveAsync();
+                    return;
+                }
+
+                var data = JsonUtility.FromJson<GachaSaveData>(json);
+
+                if (data != null)
+                {
+                    _gachaData.Clear();
+
+                    // List에서 데이터 로드
+                    if (data.GachaDataList != null && data.GachaDataList.Count > 0)
+                    {
+                        foreach (var gachaData in data.GachaDataList)
+                        {
+                            // 레벨이 없거나 0이면 계산
+                            int level = gachaData.Level > 0 ? gachaData.Level : 1;
+                            _gachaData[gachaData.Type] = new GachaTypeSaveData(gachaData.Type, gachaData.Count, level);
+                        }
+                    }
+                    else
+                    {
+                        // JsonUtility는 없는 필드를 무시하므로, 이 경우는 빈 리스트로 처리
+                        Debug.LogWarning("[GachaService] GachaDataList가 비어있습니다. 기본값으로 초기화합니다.");
+                        _gachaData.Clear();
+                        await SaveAsync();
+                    }
+                }
+                else
+                {
+                    // JSON 파싱은 성공했지만 data가 null인 경우 기본값으로 초기화
+                    Debug.LogWarning("[GachaService] 저장 데이터가 null입니다. 기본값으로 초기화합니다.");
+                    _gachaData.Clear();
+                    await SaveAsync();
+                }
+            }
+            catch (Exception ex)
+            {
+                Debug.LogError($"[GachaService] 로드 실패: {ex.Message}");
+                _gachaData.Clear();
+            }
+        }
+    }
+
+    /// <summary>
+    /// 가챠 뽑기 이벤트
+    /// </summary>
+    public struct GachaPullEvent
+    {
+        public GachaType Type;
+        public int Count;
+        public List<GachaResult> Results;
+    }
+}
